@@ -1,0 +1,65 @@
+#!/bin/sh
+
+. /libexec/tinit/common
+
+tinit_stop_services()
+{
+	# Stop all supervised services with a 5 seconds timeout.
+	tinit_log "Stopping services..."
+	sv -v -w 10 down /etc/init/current/* >/dev/null
+
+	# Now stop all supervisors
+	tinit_log "Stopping supervision..."
+	sv exit /etc/init/current/*
+
+	# Give supervision shutdown enough time to complete.
+	#sleep 1
+
+	tinit_show_proc "Post stop processes"
+}
+
+# This script is registered to runsvdir at sysinit time as the script to execute
+# at shutdown time.
+# It is called by runsvdir / init and is given a signal number as first and
+# sole argument (see below).
+#
+# When end-user runs one of the Busybox halt/poweroff/reboot commands or enter
+# the Ctrl-Alt-Del key combination (if enabled), init process is signaled as
+# following:
+# - halt:         SIGUSR1
+# - poweroff:     SIGUSR2
+# - reboot:       SIGTERM
+# - Ctrl-Alt-Del: SIGINT
+# Note that in addition, signalling runsvdir / init using SIGHUP requests it to
+# restart the entire service tree it currently supervises.
+
+signo="$1"
+case $signo in
+10)   # SIGUSR1
+      shut_opt="-h"
+      ;;
+12)   # SIGUSR2
+      shut_opt="-p"
+      ;;
+15|2) # SIGTERM | Ctrl-Alt-Del
+      shut_opt="-r"
+      ;;
+*)    # Silently ignore everything else...
+      exit 0
+      ;;
+esac
+
+# Warn every logged-in users.
+echo -e '
+***************************************
+    The system is going down NOW !!
+***************************************\n' | wall
+sync
+
+tinit_stop_services
+tinit_umount_all
+tinit_kill_all
+
+# Now that everything is done in userspace, tell the kernel to shut the hardware
+# down.
+exec /libexec/tinit/shutlinux $shut_opt

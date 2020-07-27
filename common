@@ -1,0 +1,81 @@
+tinit_log()
+{
+	echo -e "$*" >&2
+}
+
+tinit_show_mount()
+{
+	local flags
+
+	tinit_log "    Post filesytems unmount mount points:"
+
+	if ! mount 2>/dev/null | grep -q 'type[[:blank:]]\+proc'; then
+		mount -t proc -o ro proc /proc
+	fi
+
+	mount | \
+	while read name junk mntpt type opts; do
+		if echo "$opts" | grep -q 'rw'; then
+			flags="rw"
+		else
+			flags="ro"
+		fi
+		printf "    %-16s (%s)\n" "$mntpt" "$flags" >&2
+	done
+}
+
+tinit_skip_fstype()
+{
+	local skip='[[:blank:]]sysfs$|[[:blank:]]proc$|[[:blank:]]devtmpfs$|[[:blank:]]devpts$'
+
+	sed -r -n "/$skip/n;s/nodev//;p" /proc/filesystems 2>/dev/null | xargs
+}
+
+tinit_umount_all()
+{
+	local skip=$(tinit_skip_fstype)
+
+	tinit_log "Unmounting filesystems..."
+
+	# Forcibly (unreachable NFS) unmount all filesystems, remounting them
+	# read-only in case of failure.
+	# Skip pseudo filesytems indicated by the $skip variable as well as
+	# root FS.
+	umount -a -r -n -f -t ${skip// /,} >/dev/null 2>&1
+
+	# Remount root FS read-only since "umount -a -r" will refuse to unmount
+	# it.
+	mount -o remount,ro / >/dev/null 2>&1
+
+	tinit_show_mount
+}
+
+tinit_show_proc()
+{
+	local title="$1"
+
+	sleep 1
+
+	tinit_log "    $title:"
+
+	ps | grep -E '^[[:blank:]]*[[:digit:]]+[^][]+$' | \
+	while read pid usr vsz stat cmd; do
+		printf "    %5d %-8s %-4s %s\n" "$pid" "$usr" "$stat" "$cmd" >&2
+	done
+}
+
+tinit_kill_all()
+{
+	tinit_log "Killing processes..."
+
+	killall5 -KILL >/dev/null 2>&1
+	tinit_show_proc "Post kill processes"
+
+	tinit_log "Syncing..."
+
+	# Request OS to synchonize cached wirtes to persitent storage.
+	sync
+	# Give underlying storage device enough time to flush internal hardware
+	# caches.
+	sleep 1
+}
