@@ -18,8 +18,16 @@ $(addprefix $(DESTDIR)$(LIBEXECDIR)/tinit/,$(scripts)): \
 $(DESTDIR)$(LIBEXECDIR)/tinit/common: $(SRCDIR)/common
 	$(call install_recipe,-m644,$(<),$(@))
 
+# Create $(1) link pointing to $(2) filesystem entry. Link target will be
+# relative to directory containing $(1)
+# This is needed to cope with cpio archiver which refuses to include dangling
+# symlinks...
+lnrel_recipe = $(call ln_recipe, \
+                      $(shell realpath --relative-to=$(dir $(2)) $(1)), \
+                      $(2))
+
 $(DESTDIR)$(SBINDIR)/init:
-	$(call ln_recipe,$(LIBEXECDIR)/tinit/sysinit,$(@))
+	$(call lnrel_recipe,$(DESTDIR)$(LIBEXECDIR)/tinit/sysinit,$(@))
 
 uninstall: $(addprefix uninstall-,$(scripts) common) uninstall-sbin_init
 
