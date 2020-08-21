@@ -26,8 +26,8 @@ lnrel_recipe = $(call ln_recipe, \
                       $(shell realpath --relative-to=$(dir $(2)) $(1)), \
                       $(2))
 
-$(DESTDIR)$(SBINDIR)/init:
-	$(call lnrel_recipe,$(DESTDIR)$(LIBEXECDIR)/tinit/sysinit,$(@))
+$(DESTDIR)$(SBINDIR)/init: $(DESTDIR)$(LIBEXECDIR)/tinit/sysinit
+	$(call lnrel_recipe,$(<),$(@))
 
 uninstall: $(addprefix uninstall-,$(scripts) common) uninstall-sbin_init
 
