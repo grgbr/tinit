@@ -1,103 +1,14 @@
 #!/bin/sh -e
 
-. /libexec/tinit/common
-
-tinit_halt()
-{
-	exec /libexec/tinit/shutlinux -h
-}
-
-tinit_poweroff()
-{
-	exec /libexec/tinit/shutlinux -p
-}
-
-tinit_reboot()
-{
-	exec /libexec/tinit/shutlinux -r
-}
-
-tinit_term_all()
-{
-	local nr=5
-	local tmout=30
-	local now
-	local old="$(ps | awk '$5 !~ /\[.*\]$/ { print $5 }' | sort)"
-	local curr
-
-	tinit_log "Terminating processes..."
-
-	# Send all remaining processes (except current sessions' ones) a TERM
-	# signal.
-	killall5 -TERM >/dev/null 2>&1
-
-	# Give these a chance to finish properly before going down.
-	# Try to be smart by monitoring the list of running processes
-	now=$(date '+%s')
-	tmout=$((now + tmout))
-	while [ $nr -gt 0 ] && [ $now -lt $tmout ]; do
-		sleep 0.2
-
-		curr="$(ps | awk '$5 !~ /\[.*\]$/ { print $5 }' | sort)"
-		if [ "$curr" = "$old" ]; then
-			nr=$((nr - 1))
-		fi
-
-		old="$curr"
-		now=$(date '+%s')
-	done
-}
-
-tinit_shutdown()
-{
-	set +e
-	trap '' USR1 USR2 TERM INT EXIT
-
-	sync
-	tinit_log
-	sync
-
-	tinit_term_all
-	tinit_umount_all
-	tinit_kill_all
-}
-
-panic()
-{
-	tinit_log "\n"
-	tinit_log "    ###                               PANIC !!                               ###"
-	tinit_log "    ###                                                                      ###"
-	tinit_log "    ###  An unrecoverable error happened that prevented from completing      ###"
-	tinit_log "    ###  system initialization process:                                      ###"
-	tinit_log "    ###                                                                      ###"
-	if test -n "$msg"; then
-		printf "    ###  %-66s  ###\n" "$msg"
-	else
-		printf "    ###  %-66s  ###\n" "unknown error"
-	fi
-	tinit_log
-	tinit_log
-	tinit_log "Spawning emergency shell ! After recovery, at prompt, enter one of :"
-	tinit_log "* \"reboot\" to restart"
-	tinit_log "* \"poweroff\" to power down"
-	tinit_log "* \"halt\" to stop"
-	tinit_log "* \"exit\" or \"^D\" to resume booting"
-	tinit_log
-
-	trap 'tinit_shutdown; tinit_halt' USR1
-	trap 'tinit_shutdown; tinit_poweroff' USR2
-	trap 'tinit_shutdown; tinit_reboot' TERM INT
-
-	env PS1="emergency # " setsid -c sh -i \
-		</dev/console >/dev/console 2>&1 &
-	wait $!
-}
-
 export PATH="/bin:/sbin"
 
 umask 022
 
-trap 'panic' EXIT
+. /libexec/tinit/common
+
+trap 'tinit_panic "System initialization runtime failure"' EXIT
+
+dmesg -n 4
 
 ################################################################################
 # Mount required filesystems for initial OS operations.
@@ -107,11 +18,14 @@ mnt_opts="defaults,nodiratime,nosuid"
 
 # Mount proc first as mount fetches mount point list from /proc/mounts when
 # remounting.
+title='Mounting proc filesystem'
 if ! msg=$(mount -t proc \
                  -o $mnt_opts,noatime,noexec,nodev \
                  proc \
                  /proc 2>&1); then
-	panic "$msg"
+	tinit_panic "$title failed" "$msg"
+else
+	tinit_info "$title"
 fi
 
 # Mount device nodes FS.
@@ -119,28 +33,40 @@ fi
 # does not take these in account. Therefore can set no limit with respect to
 # maximum allocatable memory size to handle device nodes life cycle.
 # Kernel allocates required memory on-demand anyway...
+title='Mounting device filesystem'
 if ! msg=$(mount -t devtmpfs -o $mnt_opts,noatime,noexec dev /dev 2>&1); then
-	panic "$msg"
+	tinit_panic "$title failed" "$msg"
+else
+	tinit_info "$title"
 fi
 
 # Remount root FS read-only. Do this after mounting /dev to prevent from further
 # error when spawning an emergency shell. Otherwise, as root would be mounted
 # read-only, shell could not open device nodes in read-write mode (/dev/null)...
+title='Re-mounting root filesystem read-only'
 if ! msg=$(mount -o remount,ro,nodiratime,noatime,nodev / 2>&1); then
-	panic "$msg"
+	tinit_panic "$title failed" "$msg"
+else
+	tinit_info "$title"
 fi
 
 # Mount sysfs.
+title='Mounting sys filesystem'
 if ! msg=$(mount -t sysfs -o $mnt_opts,noatime,noexec,nodev sys /sys 2>&1); then
-	panic "$msg"
+	tinit_panic "$title failed" "$msg"
+else
+	tinit_info "$title"
 fi
 
 # At last, mount the run state directory.
+title='Mounting local state filesystem'
 if ! msg=$(mount -t tmpfs \
                  -o $mnt_opts,relatime,noexec,size=256k,nr_inodes=128,mode=755 \
                  run \
                  /var/run 2>&1); then
-	panic "$msg"
+	tinit_panic "$title failed" "$msg"
+else
+	tinit_info "$title"
 fi
 
 ################################################################################
@@ -149,29 +75,33 @@ fi
 
 ip addr change 127.0.0.1/8 dev lo
 ip link set lo up
+tinit_info "Setting up loopback interface"
 
 ################################################################################
 # Start process supervision
 ################################################################################
 
+title='Creating local service state directory'
 if ! msg=$(mkdir -m 750 /var/run/init 2>&1); then
-	panic "$msg"
+	tinit_panic "$title failed" "$msg"
+else
+	tinit_info "$title"
 fi
 
 treedir="/etc/init/current"
 if ! test -d "$treedir"; then
-	panic "cannot cd to supervision tree: No such directory"
+	tinit_panic "Cannot change to supervision tree: No such directory"
 fi
 if ! test -x "$(which runsvdir)"; then
-	panic "cannot spawn runsvdir: No such executable"
+	tinit_panic "Cannot spawn runsvdir: No such executable"
 fi
 
 if ! test -x /libexec/tinit/shutdown; then
-	panic "cannot register shutdown handler: No such executable"
+	tinit_panic "Cannot register shutdown handler: No such executable"
+fi
+if ! test -x "/etc/init/start"; then
+	tinit_panic "Missing supervision tree start: No such executable"
 fi
 
 cd "$treedir"
-exec env -i PATH="$PATH" TERM="$TERM" \
-     runsvdir \
-     -s /libexec/tinit/shutdown \
-     -P . <&-
+exec env -i PATH="$PATH" TERM="$TERM" /etc/init/start

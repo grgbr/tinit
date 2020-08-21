@@ -1,4 +1,41 @@
-tinit_log()
+tinit_term_colnr=80
+tinit_msg_colnr=$((tinit_term_colnr - 8))
+tinit_green='\e[0;32m'
+tinit_red='\e[0;31m'
+tinit_yellow='\e[0;33m'
+tinit_regular='\e[00m'
+
+tinit_err()
+{
+	local title="$1"
+	local msg="$2"
+	local detail="$3"
+
+	printf "%-*s   [${tinit_red}ERR${tinit_regular}]\n" \
+	       "$tinit_msg_colnr" \
+	       "${title}... ($msg)" >&2
+}
+
+tinit_warn()
+{
+	local title="$1"
+	local msg="$2"
+
+	printf "%-*s  [${tinit_yellow}WARN${tinit_regular}]\n" \
+	       "$tinit_msg_colnr" \
+	       "${title}... ($msg)" >&2
+}
+
+tinit_info()
+{
+	local title="$1"
+
+	printf "%-*s    [${tinit_green}OK${tinit_regular}]\n" \
+	       $tinit_msg_colnr \
+	       "${title}..." >&2
+}
+
+tinit_echo()
 {
 	echo -e "$*" >&2
 }
@@ -7,7 +44,7 @@ tinit_show_mount()
 {
 	local flags
 
-	tinit_log "    Post filesytems unmount mount points:"
+	tinit_echo "    Post filesytems unmount mount points:"
 
 	if ! mount 2>/dev/null | grep -q 'type[[:blank:]]\+proc'; then
 		mount -t proc -o ro proc /proc
@@ -35,7 +72,7 @@ tinit_umount_all()
 {
 	local skip=$(tinit_skip_fstype)
 
-	tinit_log "Unmounting filesystems..."
+	tinit_echo "Unmounting filesystems..."
 
 	# Forcibly (unreachable NFS) unmount all filesystems, remounting them
 	# read-only in case of failure.
@@ -56,7 +93,7 @@ tinit_show_proc()
 
 	sleep 1
 
-	tinit_log "    $title:"
+	tinit_echo "    $title:"
 
 	ps | grep -E '^[[:blank:]]*[[:digit:]]+[^][]+$' | \
 	while read pid usr vsz stat cmd; do
@@ -66,16 +103,148 @@ tinit_show_proc()
 
 tinit_kill_all()
 {
-	tinit_log "Killing processes..."
+	tinit_echo "Killing processes..."
 
 	killall5 -KILL >/dev/null 2>&1
 	tinit_show_proc "Post kill processes"
 
-	tinit_log "Syncing..."
+	tinit_echo "Syncing..."
 
 	# Request OS to synchonize cached wirtes to persitent storage.
 	sync
 	# Give underlying storage device enough time to flush internal hardware
 	# caches.
 	sleep 1
+}
+
+tinit_term_all()
+{
+	local nr=5
+	local tmout=30
+	local now
+	local old="$(ps | awk '$5 !~ /\[.*\]$/ { print $5 }' | sort)"
+	local curr
+
+	tinit_echo "Terminating processes..."
+
+	# Send all remaining processes (except current sessions' ones) a TERM
+	# signal.
+	killall5 -TERM >/dev/null 2>&1
+
+	# Give these a chance to finish properly before going down.
+	# Try to be smart by monitoring the list of running processes
+	now=$(date '+%s')
+	tmout=$((now + tmout))
+	while [ $nr -gt 0 ] && [ $now -lt $tmout ]; do
+		sleep 0.2
+
+		curr="$(ps | awk '$5 !~ /\[.*\]$/ { print $5 }' | sort)"
+		if [ "$curr" = "$old" ]; then
+			nr=$((nr - 1))
+		fi
+
+		old="$curr"
+		now=$(date '+%s')
+	done
+}
+
+tinit_shutdown()
+{
+	set +e
+	trap '' USR1 USR2 TERM INT EXIT
+
+	sync
+	tinit_echo
+	sync
+
+	tinit_term_all
+	tinit_umount_all
+	tinit_kill_all
+}
+
+tinit_halt()
+{
+	tinit_shutdown
+	exec /libexec/tinit/shutlinux -h
+}
+
+tinit_poweroff()
+{
+	tinit_shutdown
+	exec /libexec/tinit/shutlinux -p
+}
+
+tinit_reboot()
+{
+	tinit_shutdown
+	exec /libexec/tinit/shutlinux -r
+}
+
+# TODO: ensure password is requested before giving shell access !!
+tinit_shell()
+{
+	local prompt="$1"
+
+	tinit_echo
+	tinit_echo
+	tinit_echo "Spawning emergency shell ! After recovery, at prompt, enter one of :"
+	tinit_echo "* \"reboot\" to restart"
+	tinit_echo "* \"poweroff\" to power down"
+	tinit_echo "* \"halt\" to stop"
+	tinit_echo "* \"exit\" or \"^D\" to resume booting"
+	tinit_echo
+
+	trap 'tinit_halt' USR1
+	trap 'tinit_poweroff' USR2
+	trap 'tinit_reboot' TERM INT
+
+	env PS1="$prompt # " setsid -c sh -i \
+		</dev/console >/dev/console 2>&1 &
+
+	wait $!
+
+	tinit_echo
+}
+
+# TODO: enforce reboot if debugging disabled !!!
+tinit_panic()
+{
+	local title="$1"
+	local detail="$2"
+
+	tinit_echo "\n"
+	tinit_echo "    ###                               PANIC !!                               ###"
+	tinit_echo "    ###                                                                      ###"
+	tinit_echo "    ###  An unrecoverable error happened that prevented from completing      ###"
+	tinit_echo "    ###  system initialization process:                                      ###"
+	tinit_echo "    ###                                                                      ###"
+	printf     "    ###  %-66s  ###\n" "$title"
+
+	if [ -n "$detail" ]; then
+		tinit_echo "    ###                                                                      ###"
+		printf     "    ###  %-66s  ###\n" "$detail"
+	fi
+
+	tinit_shell "panic"
+}
+
+tinit_emerg()
+{
+	local title="$1"
+	local detail="$2"
+
+	tinit_echo "\n"
+	tinit_echo "    ###                            EMERGENCY !!                              ###"
+	tinit_echo "    ###                                                                      ###"
+	tinit_echo "    ###  An unrecoverable error preventing from completing system            ###"
+	tinit_echo "    ###  initialization process requires manual intervention:                ###"
+	tinit_echo "    ###                                                                      ###"
+	printf     "    ###  %-66s  ###\n" "$title"
+
+	if [ -n "$detail" ]; then
+		tinit_echo "    ###                                                                      ###"
+		printf     "    ###  %-66s  ###\n" "$detail"
+	fi
+
+	tinit_shell "emergency"
 }

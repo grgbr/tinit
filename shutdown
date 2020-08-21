@@ -5,11 +5,11 @@
 tinit_stop_services()
 {
 	# Stop all supervised services with a 5 seconds timeout.
-	tinit_log "Stopping services..."
+	tinit_echo "Stopping services..."
 	sv -v -w 10 down /etc/init/current/* >/dev/null
 
 	# Now stop all supervisors
-	tinit_log "Stopping supervision..."
+	tinit_echo "Stopping supervision..."
 	sv exit /etc/init/current/*
 
 	# Give supervision shutdown enough time to complete.
